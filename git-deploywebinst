@@ -1,0 +1,115 @@
+#!/bin/bash
+
+set -e
+if [ -n "$DEPLOY_DEBUG" ]; then
+	set -x
+fi
+
+if [ -z "$DEPLOY_SETUID" ]; then
+	DEPLOY_SETUID="www-data"
+fi
+
+DEPLOY_ID="$(uname -n).$(date +%s).$$"
+DEPLOY_SSH_UPLOAD_DIR="/tmp/deploy.${DEPLOY_ID}"
+
+function usage {
+    echo "Usage:"
+    echo ""
+    echo "	$0 <branch-or-commit> </path/to/dynacase-control> <context-name> <module-name> [install|upgrade]"
+    echo ""
+    echo "Default is 'upgrade'."
+    echo ""
+    echo "To deploy package to remote host:"
+    echo ""
+    echo "	export DEPLOY_SSH=<login@hostname>"
+    echo "	export DEPLOY_SETUID=<uid>"
+    echo ""
+}
+
+if [ $# -lt 4 ]; then
+    usage
+    exit 1
+fi
+
+COMMIT="$1"
+shift
+WIFF_PATH="$1/wiff"
+shift
+CONTEXT_NAME="$1"
+shift
+MODULE_NAME="$1"
+shift
+INSTALL_MODE="$1"
+shift
+if [ -z "$INSTALL_MODE" ]; then
+    INSTALL_MODE="upgrade"
+fi
+
+ADD_OPTS=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--nothing|--quick|--fast|--hurryup)
+			ADD_OPTS="$ADD_OPTS --nothing"
+			shift
+			;;
+		*)
+			echo "Unknown argument '$1'."
+			exit 1
+	esac
+done
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+
+RELEASE="RELEASE"
+if [ -f "RELEASE.local" ]; then
+    RELEASE="RELEASE.local"
+fi
+
+git mkwebinst "${MODULE_NAME}-$(head -1 VERSION)-$(head -1 ${RELEASE})" "$COMMIT"
+
+if [ -n "$DEPLOY_SSH" ]; then
+	CURRENT_UID=$(ssh "$DEPLOY_SSH" id -u)
+	CURRENT_USERNAME=$(ssh "$DEPLOY_SSH" id -n -u)
+else
+	CURRENT_UID=$(id -u)
+	CURRENT_USERNAME=$(id -n -u)
+fi
+
+SETUID_CMD="sudo su -m $DEPLOY_SETUID -c"
+if [ "$CURRENT_UID" = "$DEPLOY_SETUID" -o "$CURRENT_USERNAME" = "$DEPLOY_SETUID" ]; then
+    SETUID_CMD="bash -c"
+fi
+
+MODULE_DIR=$(pwd)
+
+if [ -n "$DEPLOY_SSH" ]; then
+	ssh "$DEPLOY_SSH" mkdir -m 0700 "${DEPLOY_SSH_UPLOAD_DIR}"
+	ssh "$DEPLOY_SSH" chown "${DEPLOY_SETUID}:" "${DEPLOY_SSH_UPLOAD_DIR}"
+	scp "$(pwd)/${MODULE_NAME}-$(head -1 VERSION)-$(head -1 ${RELEASE}).webinst" "${DEPLOY_SSH}:${DEPLOY_SSH_UPLOAD_DIR}"
+	if [ -f "$(pwd)/${MODULE_NAME}-test-$(head -1 VERSION)-$(head -1 ${RELEASE}).webinst" ]; then
+		scp "$(pwd)/${MODULE_NAME}-test-$(head -1 VERSION)-$(head -1 ${RELEASE}).webinst" "${DEPLOY_SSH}:${DEPLOY_SSH_UPLOAD_DIR}"
+	fi
+	MODULE_DIR="${DEPLOY_SSH_UPLOAD_DIR}"
+fi
+
+function _run {
+	if [ -n "$DEPLOY_SSH" ]; then
+		CMD="'$*'"
+		ssh "$DEPLOY_SSH" ${SETUID_CMD} "$CMD"
+	else
+		CMD="$*"
+		${SETUID_CMD} "$CMD"
+	fi
+}
+
+_run "${WIFF_PATH} context \"${CONTEXT_NAME}\" module upgrade --force ${ADD_OPTS} \"${MODULE_DIR}/${MODULE_NAME}-$(head -1 VERSION)-$(head -1 ${RELEASE}).webinst\""
+if [ -f "$(pwd)/${MODULE_NAME}-test-$(head -1 VERSION)-$(head -1 ${RELEASE}).webinst" ]; then
+    _run "${WIFF_PATH} context \"${CONTEXT_NAME}\" module upgrade --force ${ADD_OPTS} \"${MODULE_DIR}/${MODULE_NAME}-test-$(head -1 VERSION)-$(head -1 ${RELEASE}).webinst\""
+fi
+_run "${WIFF_PATH} context \"${CONTEXT_NAME}\" exec /usr/bin/env sed -i\"\" -e \"s/ExpiresActive On/ExpiresActive Off/g\" .htaccess"
+
+if [ -n "$DEPLOY_SSH" ]; then
+	ssh "$DEPLOY_SSH" rm -Rf "${DEPLOY_SSH_UPLOAD_DIR}"
+fi
+
+echo "[DONE]"

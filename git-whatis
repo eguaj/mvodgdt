@@ -1,0 +1,37 @@
+#!/bin/bash
+
+set -e
+shopt -s nullglob
+
+REDMINE_URL="http://dev.dynacase.org/issues/%s"
+
+function usage {
+    echo ""
+    echo "Usage:"
+    echo ""
+    echo "  $(basename $0) <#redmine_bug>"
+    echo ""
+}
+
+function whatis_bugref {
+    BUGREF=$1
+    
+    URL=$(printf "$REDMINE_URL" "$BUGREF")
+
+    w3m "$URL" || /bin/true
+}
+
+WHAT=$1
+if [ -z "$WHAT" ]; then
+    usage
+    exit 1
+fi
+
+case $WHAT in
+    *)
+	WHAT=${WHAT/#\#/}
+	whatis_bugref "$WHAT"
+	exit 1
+esac
+
+exit 0
