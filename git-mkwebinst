@@ -12,15 +12,17 @@ function usage {
     echo ""
 }
 
-if [ -z "$PUBRULE" ]; then
-    echo "Empty PUBRULE env var!"
-    usage
-    exit 1
-fi
-if [ ! -f "$PUBRULE/PubRule" ]; then
-    echo "Could not find 'PubRule' un '$PUBRULE'!"
-    usage
-    exit 1
+if [ ! -d "buildTools" ]; then
+    if [ -z "$PUBRULE" ]; then
+	echo "Empty PUBRULE env var!"
+	usage
+	exit 1
+    fi
+    if [ ! -f "$PUBRULE/PubRule" ]; then
+	echo "Could not find 'PubRule' un '$PUBRULE'!"
+	usage
+	exit 1
+    fi
 fi
 
 GZIP="--fast"
@@ -29,18 +31,33 @@ GZIP_ENV=$GZIP
 export GZIP_ENV
 
 ARCHIVE_PREFIX=$1
+ARCHIVE_TREE=$2
+MAKEFILE_TARGET=$3
+if [ -z "$ARCHIVE_PREFIX" -a -z "$ARCHIVE_TREE" ]; then
+    ARCHIVE_PREFIX=$(basename "$PWD")
+    ARCHIVE_TREE="HEAD"
+    echo -n "Use arguments '$ARCHIVE_PREFIX $ARCHIVE_TREE' [Y/n]? "
+    read ANS
+    if [ "$ANS" != "" -a "$ANS" != "y" -a "$AND" != "Y" ]; then
+	usage
+	exit 1
+    fi
+    echo "Ok, using '$ARCHIVE_PREFIX $ARCHIVE_TREE'!"
+fi
 if [ -z "$ARCHIVE_PREFIX" ]; then
     echo "Missing <archive_prefix>!"
     usage
     exit 1
 fi
-
-ARCHIVE_TREE=$2
 if [ -z "$ARCHIVE_TREE" ]; then
     ARCHIVE_TREE="HEAD"
 fi
 
-TMP_DIR=`mktemp -d -t "$ARCHIVE_PREFIX.XXXXXX"`
+if [ -d "/Volumes/RAM" ]; then
+    TMP_DIR=`TMPDIR=/Volumes/RAM mktemp -d -t "$ARCHIVE_PREFIX.XXXXXX"`
+else
+    TMP_DIR=`TMPDIR=/Volumes/SCM/tmp mktemp -d -t "$ARCHIVE_PREFIX.XXXXXX"`
+fi
 
 ORIG_DIR=`pwd`
 
@@ -56,6 +73,10 @@ else
 	mkdir "$TMP_DIR/$ARCHIVE_PREFIX"
 	tar -cf - . | tar -C "$TMP_DIR/$ARCHIVE_PREFIX" -xf -
 fi
+if [ -f ".gitmodules" -a "$(grep -c \"buildTools\" .gitmodules)" = "1" ]; then
+    tar -C buildTools -cf - . | tar -C "$TMP_DIR/$ARCHIVE_PREFIX/buildTools" -xf -
+    # git clone /Volumes/SCM/git/anakeen/dynacase-buildtools buildTools || git clone git@github.com:Anakeen/dynacase-buildtools.git buildTools
+fi
 
 if [ -n "$DEPLOY_PATCHES" -a -d "deploy-patches" ]; then
 	for PATCH in deploy-patches/*.diff; do
@@ -65,34 +86,67 @@ if [ -n "$DEPLOY_PATCHES" -a -d "deploy-patches" ]; then
 fi
 
 if [ -f "VERSION.local" ]; then
-    echo "Copying VERSION.local into build dir..."
-    cp VERSION.local "$TMP_DIR/$ARCHIVE_PREFIX/VERSION"
+    find "$TMP_DIR/$ARCHIVE_PREFIX" -type f -name "VERSION" | while read VF; do
+	echo "Copying VERSION.local into '$VF'..."
+	cp VERSION.local "$VF"
+    done
 fi
 if [ -f "RELEASE.local" ]; then
-    echo "Copying RELEASE.local into build dir..."
-    cp RELEASE.local "$TMP_DIR/$ARCHIVE_PREFIX/RELEASE"
+    find "$TMP_DIR/$ARCHIVE_PREFIX" -type f -name "RELEASE" | while read RF; do
+	echo "Copying RELEASE.local into '$RF'..."
+	cp RELEASE.local "$RF"
+    done
 fi
 
+OUT=$(TMPDIR=$TMP_DIR mktemp -t "build.log.XXXXXX")
+set +e
 (
+    set -e
     echo "* Changing directory to '$TMP_DIR/$ARCHIVE_PREFIX'..."
     cd "$TMP_DIR/$ARCHIVE_PREFIX"
+    if [ -n "$PRE_BUILD" ]; then
+	echo "* Running PRE_BUILD '$PRE_BUILD'..."
+	$PRE_BUILD
+    fi
+#    if [ -f ".gitmodules" -a "$(grep -c \"buildTools\" .gitmodules)" = "1" ]; then
+#	git clone /Volumes/SCM/git/anakeen/dynacase-buildtools buildTools || git clone git@github.com:Anakeen/dynacase-buildtools.git buildTools
+#    fi
     echo "* Running 'autoconf'..."
-    autoconf
-    echo "* Running './configure--with-pubrule=\"$PUBRULE\"'..."
-    ./configure --with-pubrule="$PUBRULE"
+    [ ! -f "./configure" ] && autoconf
+    if [ -n "$PUBRULE" ]; then
+	echo "* Running './configure--with-pubrule=\"$PUBRULE\"'..."
+	./configure --with-pubrule="$PUBRULE"
+    else
+	echo "* Running './configure..."
+	./configure
+    fi
     echo "* Running 'make webinst'..."
-    make webinst
+    if [ -n "$MAKEFILE_TARGET" ]; then
+	make "$MAKEFILE_TARGET"
+    else
+	make webinst-all || make webinst
+    fi
+    if [ -n "$POST_BUILD" ]; then
+	echo "* Running POST_BUILD '$POST_BUILD'..."
+	$POST_BUILD
+    fi
     echo "* Produced webinst:"
     for WEBINST in *.webinst; do
 	echo "  - $WEBINST"
 	cp "$WEBINST" "$ORIG_DIR"
     done
-)
+    set +e
+)# > "$OUT" 2>&1
+#) 2>&1 | (pv -l -N "Building webinst" || cat) > "$OUT"
 RET=$?
+set -e
 if [ $RET -ne 0 ]; then
+    cat "$OUT"
     exit $RET
 fi
 
 rm -Rf "$TMP_DIR"
 
 exit 0
+
+# vim: tabstop=8 softtabstop=4 shiftwidth=4 noexpandtab

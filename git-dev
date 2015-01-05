@@ -1,0 +1,226 @@
+#!/bin/bash
+
+if [ "$DEBUG" = "yes" ]; then
+	set -x
+fi
+
+ME=$(basename "$0" | sed -e 's/^git-//')
+
+function _usage {
+	cat <<EOF
+Usage
+-----
+
+	git ${ME} config
+
+		Configure default parameters
+
+	git ${ME} new <issue> [<version>]
+
+		Create a new local branch for working on the issue.
+
+		Version is the dynacase-core's version: "3.2", "3.3", etc.
+		If version is missing, it will be autotedetected from Redmine's
+		issue.
+
+	git ${ME} checkout <issue>
+
+		Checkout the branch previsouly opened fot the issue.
+
+	git ${ME} whatis [<issue>]
+
+		Open the Redmine description page for the issue.
+
+	git ${ME} pullreq
+
+		Open Github's pull-request for current working branch.
+
+EOF
+}
+
+function _config {
+	read -p "Redmine base URL (e.g. \"http://dev.dynacase.org\"): " REDMINE
+	read -p "Github's username (e.g. \"jon.doe\"): " GITHUB_USERNAME
+	cat <<EOF > "$CONFIG"
+REDMINE=${REDMINE}
+GITHUB_USERNAME=${GITHUB_USERNAME}
+EOF
+}
+
+function _load_config {
+	CONFIG="$HOME/.git-dev-config"
+	if [ -r "$CONFIG" ]; then
+		. "$CONFIG"
+	else
+		_config
+		. "$CONFIG"
+	fi
+	if [ -z "${REDMINE}" ]; then
+		echo "Error: undefined REDMINE in '${CONFIG}'."
+		echo "Re-run 'git ${ME} config'"
+		exit 1
+	fi
+	if [ -z "${GITHUB_USERNAME}" ]; then
+		echo "Error: undefined GITHUB_USERNAME in '${CONFIG}'."
+		echo "Re-run 'git ${ME} config'"
+		exit 1
+	fi
+}
+
+function _get_version_for_issue {
+	local ISSUE=$1
+	curl -s "${REDMINE}/issues/${ISSUE}.json" | php -r '
+		$r = json_decode(file_get_contents("php://stdin"), true);
+		$v = $r["issue"]["fixed_version"]["name"];
+		if (preg_match("/^(?P<major>\\d+)\\.(?P<minor>\\d+)/", $v, $m)) {
+			printf("%s.%s\n", $m["major"], $m["minor"]);
+		};'
+}
+
+function _get_current_branch {
+	git branch 2>&1 | grep '^* ' | sed -n -e 's/^\* //p'
+}
+
+function _get_issue_from_branch {
+	if [ -z "$1" ]; then
+		_get_current_branch | sed -n -e 's/^.*-[a-zA-Z]\([0-9]\+\)$/\1/p'
+	else
+		echo "$1" | sed -n -e 's/^.*-[a-zA-Z]\([0-9]\+\)$/\1/p'
+	fi
+}
+
+function _get_version_from_branch {
+	if [ -z "$1" ]; then
+		_get_current_branch | sed -n -e 's/^\([0-9.]\+\)-.*/\1/p'
+	else
+		echo "$1" | sed -n -e 's/^\([0-9.]\+\)-.*/\1/p'
+	fi
+}
+
+function _get_project {
+	git remote -v show | sed -nE -e 's;^.*(git@|git://)github.com[:/]Anakeen/([^ ][^ ]*)\.git[[:space:]]*\(fetch\)$;\2;p' | head -1
+}
+
+function _checkout {
+	local ISSUE=$1
+	if [ -z "${ISSUE}" ]; then
+		usage
+		exit 1
+	fi
+	local BRANCH=$(git branch | grep -- "-A${ISSUE}\$" | sed -n -e 's/^..//p' | head -1)
+	if [ -z "${BRANCH}" ]; then
+		echo "No branch found for issue '${ISSUE}'."
+		echo "Try \`git dev new <issue>\` first?"
+		exit 1
+	fi
+	git checkout "$BRANCH"
+}
+
+function _new {
+	local ISSUE=$1
+	if [ -z "${ISSUE}" ]; then
+		usage
+		exit 1
+	fi
+	local VERSION=$2
+	local BRANCH=$(git branch -a | grep -- "-A${ISSUE}\$" | sed -n -e 's/^..//p' || head -1)
+	if [ -n "${BRANCH}" ]; then
+		echo "A branch '${BRANCH}' already exists for issue '${ISSUE}'."
+		echo "Try \`git dev checkout ${ISSUE}\`?"
+		exit 1
+	fi
+	if [ -z "${VERSION}" ]; then
+		VERSION=$(_get_version_for_issue "${ISSUE}")
+	fi
+	if [ -z "${VERSION}" ]; then
+		echo "Could not find version for issue '${ISSUE}'."
+		echo "Try specifying the version with \`git dev new ${ISSUE} <version>\`?"
+		exit 1
+	fi
+	git fetch --all
+	echo git checkout -b "${VERSION}-A${ISSUE}" "anakeen/${VERSION}-integration"
+	git checkout -b "${VERSION}-A${ISSUE}" "anakeen/${VERSION}-integration"
+}
+
+function _open {
+	local URL=$1
+	if [ "$(uname -s)" = "Darwin" ]; then
+		open "$URL"
+	else
+		xdg-open "$URL"
+	fi
+}
+
+function _whatis {
+	local ISSUE=$1
+	if [ -z "${ISSUE}" ]; then
+		ISSUE=$(_get_issue_from_branch)
+		if [ -z "${ISSUE}" ]; then
+			echo "Error: could not find issue for current branch"
+		fi
+	fi
+	if [ -z "${ISSUE}" ]; then
+		usage
+		exit 1
+	fi
+	local URL=$(printf "${REDMINE}/issues/%s" "${ISSUE}")
+	_open "${URL}"
+}
+
+function _pullreq {
+	local ISSUE=$(_get_issue_from_branch)
+	if [ -z "${ISSUE}" ]; then
+		echo "Error: could not find issue for current branch."
+		usage
+		exit 1
+	fi
+	local VERSION=$(_get_version_from_branch)
+	if [ -z "${VERSION}" ]; then
+		echo "Error: could not find version for current branch."
+		usage
+		exit 1
+	fi
+	local GITHUB_BASE="http://github.com/${GITHUB_USERNAME}"
+	local GITHUB_PROJECT=$(_get_project)
+	if [ -z "${GITHUB_PROJECT}" ]; then
+		echo "Error: could not get github project."
+		exit 1
+	fi
+	local BRANCH=$(_get_current_branch)
+	echo "Pull-request: Anakeen:${VERSION}-integration...${BRANCH}"
+	# _open "${GITHUB_BASE}/${GITHUB_PROJECT}/pull/new/$BRANCH"
+	_open "${GITHUB_BASE}/${GITHUB_PROJECT}/pull/new/Anakeen:${VERSION}-integration...${BRANCH}"
+}
+
+function _main {
+	local CMD=$1
+	if [ -z "$CMD" ]; then
+		_usage
+		exit 1
+	fi
+	shift
+	_load_config
+	case "$CMD" in
+		new)
+			_new "$@"
+			;;
+		checkout)
+			_checkout "$@"
+			;;
+		whatis)
+			_whatis "$@"
+			;;
+		pullreq)
+			_pullreq "$@"
+			;;
+		config)
+			_config "$@"
+			;;
+		*)
+			echo "Unknown command '${CMD}'."
+			_usage
+			exit 1
+	esac
+}
+
+_main "$@"
