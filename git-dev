@@ -69,7 +69,7 @@ function _load_config {
 
 function _get_version_for_issue {
 	local ISSUE=$1
-	curl -s "${REDMINE}/issues/${ISSUE}.json" | php -r '
+	curl -sL "${REDMINE}/issues/${ISSUE}.json" | php -r '
 		$r = json_decode(file_get_contents("php://stdin"), true);
 		$v = $r["issue"]["fixed_version"]["name"];
 		if (preg_match("/^(?P<major>\\d+)\\.(?P<minor>\\d+)/", $v, $m)) {

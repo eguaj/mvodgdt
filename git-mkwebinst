@@ -14,9 +14,10 @@ function usage {
 
 if [ ! -d "buildTools" ]; then
     if [ -z "$PUBRULE" ]; then
-	echo "Empty PUBRULE env var!"
-	usage
-	exit 1
+	PUBRULE="/Volumes/SCM/git/anakeen/dynacase-buildtools"
+	# echo "Empty PUBRULE env var!"
+	# usage
+	# exit 1
     fi
     if [ ! -f "$PUBRULE/PubRule" ]; then
 	echo "Could not find 'PubRule' un '$PUBRULE'!"
@@ -30,6 +31,23 @@ export GZIP
 GZIP_ENV=$GZIP
 export GZIP_ENV
 
+OPT_LOCAL_VERSION=yes
+while [ $# -gt 0 ]; do
+    case $1 in
+	--no-version-local|--no-local-version|--no-version-override)
+	    OPT_LOCAL_VERSION=no
+	    shift
+	    ;;
+	--)
+	    shift
+	    break
+	    ;;
+	*)
+	    break
+	    ;;
+    esac
+done
+
 ARCHIVE_PREFIX=$1
 ARCHIVE_TREE=$2
 MAKEFILE_TARGET=$3
@@ -37,8 +55,8 @@ if [ -z "$ARCHIVE_PREFIX" -a -z "$ARCHIVE_TREE" ]; then
     ARCHIVE_PREFIX=$(basename "$PWD")
     ARCHIVE_TREE="HEAD"
     echo -n "Use arguments '$ARCHIVE_PREFIX $ARCHIVE_TREE' [Y/n]? "
-    read ANS
-    if [ "$ANS" != "" -a "$ANS" != "y" -a "$AND" != "Y" ]; then
+    read ANS || true
+    if [[ "$ANS" != "" ]] && [[ "$ANS" != "Y" ]] && [[ "$ANS" != "y" ]]; then
 	usage
 	exit 1
     fi
@@ -73,10 +91,8 @@ else
 	mkdir "$TMP_DIR/$ARCHIVE_PREFIX"
 	tar -cf - . | tar -C "$TMP_DIR/$ARCHIVE_PREFIX" -xf -
 fi
-if [ -f ".gitmodules" -a "$(grep -c \"buildTools\" .gitmodules)" = "1" ]; then
-    tar -C buildTools -cf - . | tar -C "$TMP_DIR/$ARCHIVE_PREFIX/buildTools" -xf -
-    # git clone /Volumes/SCM/git/anakeen/dynacase-buildtools buildTools || git clone git@github.com:Anakeen/dynacase-buildtools.git buildTools
-fi
+[ -f ".gitmodules" ] && grep -q "path = buildTools" .gitmodules && tar -C buildTools -cf - . | tar -C "$TMP_DIR/$ARCHIVE_PREFIX/buildTools" -xf -
+# git clone /Volumes/SCM/git/anakeen/dynacase-buildtools buildTools || git clone git@github.com:Anakeen/dynacase-buildtools.git buildTools
 
 if [ -n "$DEPLOY_PATCHES" -a -d "deploy-patches" ]; then
 	for PATCH in deploy-patches/*.diff; do
@@ -85,50 +101,58 @@ if [ -n "$DEPLOY_PATCHES" -a -d "deploy-patches" ]; then
 	done
 fi
 
-if [ -f "VERSION.local" ]; then
+if [ "$OPT_LOCAL_VERSION" = "yes" -a -f "VERSION.local" ]; then
     find "$TMP_DIR/$ARCHIVE_PREFIX" -type f -name "VERSION" | while read VF; do
 	echo "Copying VERSION.local into '$VF'..."
 	cp VERSION.local "$VF"
     done
 fi
-if [ -f "RELEASE.local" ]; then
+if [ "$OPT_LOCAL_VERSION" = "yes" -a -f "RELEASE.local" ]; then
     find "$TMP_DIR/$ARCHIVE_PREFIX" -type f -name "RELEASE" | while read RF; do
 	echo "Copying RELEASE.local into '$RF'..."
 	cp RELEASE.local "$RF"
     done
 fi
 
-OUT=$(TMPDIR=$TMP_DIR mktemp -t "build.log.XXXXXX")
+OUT=$(TMPDIR="$TMP_DIR" mktemp -t "build.log.XXXXXX")
 set +e
 (
     set -e
     echo "* Changing directory to '$TMP_DIR/$ARCHIVE_PREFIX'..."
     cd "$TMP_DIR/$ARCHIVE_PREFIX"
-    if [ -n "$PRE_BUILD" ]; then
-	echo "* Running PRE_BUILD '$PRE_BUILD'..."
-	$PRE_BUILD
-    fi
-#    if [ -f ".gitmodules" -a "$(grep -c \"buildTools\" .gitmodules)" = "1" ]; then
-#	git clone /Volumes/SCM/git/anakeen/dynacase-buildtools buildTools || git clone git@github.com:Anakeen/dynacase-buildtools.git buildTools
-#    fi
-    echo "* Running 'autoconf'..."
-    [ ! -f "./configure" ] && autoconf
-    if [ -n "$PUBRULE" ]; then
-	echo "* Running './configure--with-pubrule=\"$PUBRULE\"'..."
-	./configure --with-pubrule="$PUBRULE"
+    if [ -f "build.json" ]; then
+	if [ -f "dynacase-devtool.phar" ]; then
+	    php dynacase-devtool.phar generateWebinst -s .
+	else
+	    php /Volumes/SCM/git/anakeen/development-tools/dynacase-devtool.phar generateWebinst -s .
+	fi
     else
-	echo "* Running './configure..."
-	./configure
-    fi
-    echo "* Running 'make webinst'..."
-    if [ -n "$MAKEFILE_TARGET" ]; then
-	make "$MAKEFILE_TARGET"
-    else
-	make webinst-all || make webinst
-    fi
-    if [ -n "$POST_BUILD" ]; then
-	echo "* Running POST_BUILD '$POST_BUILD'..."
-	$POST_BUILD
+	if [ -n "$PRE_BUILD" ]; then
+	    echo "* Running PRE_BUILD '$PRE_BUILD'..."
+	    $PRE_BUILD
+	fi
+	#if [ -f ".gitmodules" -a "$(grep -c \"buildTools\" .gitmodules)" = "1" ]; then
+	#   git clone /Volumes/SCM/git/anakeen/dynacase-buildtools buildTools || git clone git@github.com:Anakeen/dynacase-buildtools.git buildTools
+	#fi
+	echo "* Running 'autoconf'..."
+	[ ! -f "./configure" ] && autoconf
+	if [ -n "$PUBRULE" ]; then
+	    echo "* Running './configure--with-pubrule=\"$PUBRULE\"'..."
+	    ./configure --with-pubrule="$PUBRULE"
+	else
+	    echo "* Running './configure..."
+	    ./configure
+	fi
+	echo "* Running 'make webinst'..."
+	if [ -n "$MAKEFILE_TARGET" ]; then
+	    quiet make "$MAKEFILE_TARGET"
+	else
+	    quiet make webinst-all || quiet make webinst
+	fi
+	if [ -n "$POST_BUILD" ]; then
+	    echo "* Running POST_BUILD '$POST_BUILD'..."
+	    $POST_BUILD
+	fi
     fi
     echo "* Produced webinst:"
     for WEBINST in *.webinst; do
@@ -136,8 +160,8 @@ set +e
 	cp "$WEBINST" "$ORIG_DIR"
     done
     set +e
-)# > "$OUT" 2>&1
-#) 2>&1 | (pv -l -N "Building webinst" || cat) > "$OUT"
+    ) # > "$OUT" 2>&1
+    # ) 2>&1 | (pv -l -N "Building webinst" || cat) > "$OUT"
 RET=$?
 set -e
 if [ $RET -ne 0 ]; then
@@ -145,7 +169,7 @@ if [ $RET -ne 0 ]; then
     exit $RET
 fi
 
-rm -Rf "$TMP_DIR"
+# rm -Rf "$TMP_DIR"
 
 exit 0
 

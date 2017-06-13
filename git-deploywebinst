@@ -2,6 +2,10 @@
 
 set -e
 
+if [ -n "$DEPLOY_DEBUG" ]; then
+	set -x
+fi
+
 if [ -f ".deploywebinst.conf" ]; then
 	. .deploywebinst.conf
 fi
@@ -88,8 +92,13 @@ done
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
 
-VERSION=$(git show "$COMMIT:VERSION" | head -1)
-RELEASE=$(git show "$COMMIT:RELEASE" | head -1)
+if [ -f "build.json" ]; then
+	VERSION=$(php -r '$r=json_decode(file_get_contents($argv[1]), true); printf("%s\n", $r[$argv[2]]);' build.json version)
+	RELEASE=$(php -r '$r=json_decode(file_get_contents($argv[1]), true); printf("%s\n", $r[$argv[2]]);' build.json release)
+else
+	VERSION=$(git show "$COMMIT:VERSION" | head -1)
+	RELEASE=$(git show "$COMMIT:RELEASE" | head -1)
+fi
 if [ -f "RELEASE.local" ]; then
     RELEASE=$(head -1 RELEASE.local)
 fi
