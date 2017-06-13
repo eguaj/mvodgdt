@@ -1,0 +1,454 @@
+#!/bin/bash
+# vim: tabstop=8 softtabstop=4 shiftwidth=4 noexpandtab
+
+set -o pipefail
+
+function usage {
+    cat <<EOF 1>&2
+
+Usage:
+
+    $0 [options] </path/to/webinst(A)>|<gitref(A)> </path/to/webinst(B)>|<gitref(B)> 
+
+Generate a patchset between two webinsts, or gitrefs, A (oldest) and B (newest).
+
+options:
+
+    -h|--help
+	Print usage
+    -n|--module-name <moduleName>
+	Set patchset's module name
+    -v|--module-version <version>
+	Set patchset's module version
+    -p|--patchset-level <level> (default '1')
+	Set patchset's level
+    --stdout
+	Do not produce packages and just print the patch/diff on stdout
+    --no-dereference
+	Do not dereference symlinks when producing the patch/diff
+
+EOF
+}
+
+function printerr {
+    printf "$@" | sed -e 's/^/ERROR: /' 1>&2
+}
+
+function main {
+    local PATCHSET_LEVEL=1
+    local MODULE_NAME=""
+    local MODULE_VERSION=""
+    local WEBINST_A=""
+    local WEBINST_B=""
+    local STDOUT=no
+    local NODEREF=no
+    local OPT
+    while true; do
+	OPT=$1
+	case "$OPT" in
+	    -h|--help)
+		usage
+		return 1
+		;;
+	    -p|--patchset-level)
+		shift
+		if [ -z "$1" ]; then
+		    printerr "Missing level in '%s'.\n" "$OPT"
+		    usage
+		    return 2
+		fi
+		PATCHSET_LEVEL=$1
+		;;
+	    -n|--module-name)
+		shift
+		if [ -z "$1" ]; then
+		    printerr "Missing module name in '%s'.\n" "$OPT"
+		    usage
+		    return 2
+		fi
+		MODULE_NAME=$1
+		;;
+	    -v|--module-version)
+		shift
+		if [ -z "$1" ]; then
+		    printerr "Missing version in '%s'.\n" "$OPT"
+		    usage
+		    return 2
+		fi
+		MODULE_VERSION=$1
+		;;
+	    --stdout)
+		STDOUT=yes
+		;;
+	    --no-dereference)
+		NODEREF=yes
+		;;
+	    --)
+		shift
+		break
+		;;
+	    -?*)
+		printerr "Unknown option '%s'.\n" "$1"
+		usage
+		return 2
+		;;
+	    *)
+		break
+		;;
+	esac
+	shift
+    done
+    if [ $# -le 0 ]; then
+	usage
+	return 2
+    fi
+    local WEBINST_A=$1
+    shift
+    if [ -z "$1" ]; then
+	printerr "Missing <webinst A>.\n"
+	return 2
+    fi
+    local WEBINST_B=$1
+    if [ -z "$1" ]; then
+	printerr "Missing <webinst B>.\n"
+	return 2
+    fi
+    shift
+
+    # -- Create main work dir
+    local WORK_DIR=$(mktemp -t -d "patchset.XXXXXX.tmp")
+    if [ $? -ne 0 ]; then
+	printf "Error creating temporary patchset directory!\n"
+	return 1
+    fi
+
+    # -- Build gitref A if required
+    if [ ! -f "$WEBINST_A" ]; then
+	printf "\n[+] Building webinst (A) from GIT ref '%s'.\n" "$WEBINST_A"
+	mkdir -p "${WORK_DIR}/a"
+	build_gitref "$WEBINST_A" "${WORK_DIR}/a"
+	if [ $? -ne 0 ]; then
+	    printerr "Error building ref '%s'.\n" "$WEBINST_A"
+	    rm -Rf -- "$WORK_DIR"
+	    return 3
+	fi
+	WEBINST_A=("${WORK_DIR}"/a/*.webinst)
+	printf "[+] Done: built '%s'.\n" "${WEBINST_A[*]}"
+    else
+	WEBINST_A=($WEBINST_A)
+    fi
+
+    # -- Build gitref B if required
+    if [ ! -f "$WEBINST_B" ]; then
+	printf "\n[+] Building webinst (B) from GIT ref '%s'.\n" "$WEBINST_B"
+	mkdir -p "${WORK_DIR}/b"
+	build_gitref "$WEBINST_B" "${WORK_DIR}/b"
+	if [ $? -ne 0 ]; then
+	    printerr "Error building ref '%s'.\n" "$WEBINST_B"
+	    rm -Rf -- "$WORK_DIR"
+	    return 3
+	fi
+	WEBINST_B=("${WORK_DIR}"/b/*.webinst)
+	printf "[+] Done: built '%s'.\n" "${WEBINST_B[*]}"
+    else
+	WEBINST_B=($WEBINST_B)
+    fi
+
+    # -- Try to extract module name/version from module A
+    if [ ${#WEBINST_A[@]} -eq 1 ]; then
+	if [ -z "$MODULE_NAME" ]; then 
+	    MODULE_NAME=$(getWebinstNameVersion "${WEBINST_A[0]}" | head -1)
+	fi
+	if [ -z "$MODULE_VERSION" ]; then
+	    MODULE_VERSION=$(getWebinstNameVersion "${WEBINST_A[0]}" | tail -1)
+	fi
+    fi
+    if [ -z "$MODULE_NAME" ]; then
+	printerr "Could not get module name from produced webinst (maybe multiple webinst were produced)!\n"
+	printerr "Hint: you might need to use --module-name and --module-version options.\n"
+	rm -Rf -- "$WORK_DIR"
+	return 3
+    fi
+    if [ -z "$MODULE_NAME" ]; then
+	printerr "Could not get module version from produced webinst (maybe multiple webinst were produced)!\n"
+	printerr "Hint: you might need to use --module-name and --module-version options.\n"
+	rm -Rf -- "$WORK_DIR"
+	return 3
+    fi
+
+    # -- Generate patchset
+    local PATCHSET_BASENAME="${MODULE_NAME}-${MODULE_VERSION}-patchset_"
+    local PATCHSET_NAME="${PATCHSET_BASENAME}${PATCHSET_LEVEL}"
+    local PATCHSET_WEBINST="${PATCHSET_NAME}-${PATCHSET_LEVEL}-0.webinst"
+
+    printf "Generating patchset for module '%s' with version '%s'.\n" "$MODULE_NAME" "$MODULE_VERSION"
+
+    local INFOXML="$WORK_DIR/info.xml"
+    cat <<EOF > "$INFOXML"
+<?xml version="1.0"?>
+<module xmlns="urn:dynacase:webinst:module/1.0" name="$(htmlspecialchars "${PATCHSET_NAME}")" version="$(htmlspecialchars "${PATCHSET_LEVEL}")" release="0">
+  <requires>
+    <module name="$(htmlspecialchars "${MODULE_NAME}")" comp="ge" version="$(htmlspecialchars "${MODULE_VERSION}")"/>
+    $(genRequiresPatchset "${PATCHSET_BASENAME}" "${PATCHSET_LEVEL}")
+  </requires>
+  <pre-install>
+    <check type="syscommand" command="patch">
+      <label>Check for "patch" command.</label>
+      <help>Missing "patch" command: you might need to install a "patch" package from your distribution.</help>
+    </check>
+  </pre-install>
+  <post-install>
+    <!-- Test patch -->
+    <check type="exec" cmd="$(htmlspecialchars "patch -p1 --dry-run < $(escapeshellarg "patchsets/${PATCHSET_NAME}/diff")")">
+      <label>Testing patchset &quot;$(htmlspecialchars "patchsets/${PATCHSET_NAME}/diff")&quot;</label>
+      <help>Patchset &quot;$(htmlspecialchars "patchsets/${PATCHSET_NAME}/diff")&quot; will not apply!</help>
+    </check>
+    <!-- Apply patch -->
+    <check type="exec" cmd="$(htmlspecialchars "patch -p1 < $(escapeshellarg "patchsets/${PATCHSET_NAME}/diff")")">
+      <label>Applying patchset &quot;$(htmlspecialchars "patchsets/${PATCHSET_NAME}/diff")&quot;</label>
+      <help>Error applying patchset &quot;$(htmlspecialchars "patchsets/${PATCHSET_NAME}/diff")&quot;</help>
+    </check>
+  </post-install>
+</module>
+EOF
+
+    printf "\n[+] info.xml\n\n"
+    cat "$INFOXML"
+    printf "\n"
+
+    local PATCHSET_DIR="$WORK_DIR/content/patchsets/${PATCHSET_NAME}"
+    mkdir -p "$PATCHSET_DIR"
+    local DIFF="$PATCHSET_DIR/diff"
+
+    # -- Unpack A
+    mkdir -p "${WORK_DIR}/diff/a"
+    local A
+    for A in "${WEBINST_A[@]}"; do
+	printf "[+] Unpacking '%s' into diff/a.\n" "$A"
+	unpackWebinst "$A" "${WORK_DIR}/diff/a"
+	if [ $? -ne 0 ]; then
+	    printerr "Error unpacking '%s'!\n" "$A"
+	    rm -Rf -- "$WORK_DIR"
+	    return 1
+	fi
+	printf "[+] Done.\n"
+    done
+
+    # -- Unpack B
+    mkdir -p "${WORK_DIR}/diff/b"
+    local B
+    for B in "${WEBINST_B[@]}"; do
+	printf "[+] Unpacking '%s' into diff/b.\n" "$B"
+	unpackWebinst "$B" "${WORK_DIR}/diff/b"
+	if [ $? -ne 0 ]; then
+	    printerr "Error unpacking '%s'!\n" "$B"
+	    rm -Rf -- "$WORK_DIR"
+	    return 1
+	fi
+	printf "[+] Done.\n"
+    done
+
+    # -- Diff A B
+    printf "[+] Diff '%s' '%s'.\n" "${WORK_DIR}/diff/a" "${WORK_DIR}/diff/b"
+    (
+	pushd "${WORK_DIR}/diff"
+	if [ "$NODEREF" = "yes" ]; then
+	    find a -type l -delete
+	    find b -type l -delete
+	fi
+	diff -urN a b > "$DIFF"
+	popd
+    )
+    if [ $? -ne 0 ]; then
+	printf "Error diff '%s' '%s'!\n" "${WORK_DIR}/diff/a" "${WORK_DIR}/diff/b"
+	rm -Rf -- "$WORK_DIR"
+	return 1
+    fi
+
+    local COUNT=$(wc -l < "$DIFF")
+    if [ "$COUNT" = "0" ]; then
+	printerr "No difference!\n"
+	rm -Rf -- "$WORK_DIR"
+	return 1
+    fi
+
+    if [ "$STDOUT" = "yes" ]; then
+	cat "$DIFF"
+    else
+	tar -C "$WORK_DIR/content" -zcf "$WORK_DIR/content.tar.gz" .
+	tar -C "$WORK_DIR" -zcf "${PATCHSET_WEBINST}" info.xml content.tar.gz 
+
+	printf "\n[+] content.tar.gz\n\n"
+	tar -zxOf "${PATCHSET_WEBINST}" content.tar.gz | tar ztvf -
+
+	printf "\n[+] Produced patchset: %s\n" "${PATCHSET_WEBINST}"
+    fi
+
+    rm -Rf -- "$WORK_DIR"
+}
+
+function escapeshellarg {
+    local ARG=$1
+    if [ "$ARG" = "--" ]; then
+	ARG=$(head -1)
+    fi
+    php -r 'printf("%s\n", escapeshellarg($argv[1]));' "$ARG"
+}
+
+function htmlspecialchars {
+    local ARG=$1
+    if [ "$ARG" = "--" ]; then
+	ARG=$(head -1)
+    fi
+    php -r 'printf("%s\n", htmlspecialchars($argv[1]));' "$ARG"
+}
+
+function diffWebinst {
+    local WEBINST_A=$1
+    local WEBINST_B=$2
+    local PREFIX_A=$(basename "$WEBINST_A")
+    local PREFIX_B=$(basename "$WEBINST_B")
+
+    local WORK_DIR=$(mktemp -t -d "diffWebinst.XXXXXX.tmp")
+    if [ $? -ne 0 ]; then
+	printf "Error creating temporary directory.\n"
+	return 1
+    fi
+    local WDIR_A="$WORK_DIR/a"
+    mkdir -p "$WDIR_A"
+    local WDIR_B="$WORK_DIR/b"
+    mkdir -p "$WDIR_B"
+    unpackWebinst "$WEBINST_A" "$WDIR_A"
+    if [ $? -ne 0 ]; then
+	printf "Error extracting '%s' into '%s'.\n" -- "$WEBINST_A" "$WDIR_A"
+	rm -Rf -- "$WORK_DIR"
+	return 1
+    fi
+    unpackWebinst "$WEBINST_B" "$WDIR_B"
+    if [ $? -ne 0 ]; then
+	printf "Error extracting '%s' into '%s'.\n" -- "$WEBINST_B" "$WDIR_B"
+	rm -Rf -- "$WORK_DIR"
+	return 1
+    fi
+    (cd "$WORK_DIR" && diff -urN a b)
+    rm -Rf -- "$WORK_DIR"
+}
+
+function unpackWebinst {
+    local WEBINST=$1
+    local DIR=$2
+
+    tar zxOf "$WEBINST" content.tar.gz | tar -C "$DIR" -zxf -
+}
+
+function getWebinstNameVersion {
+    local WEBINST=$1
+    tar zxOf "$WEBINST" info.xml | php -r '
+$content = file_get_contents("php://stdin");
+$dom = new DOMDocument();
+$dom->loadXML($content);
+$root = $dom->documentElement;
+printf("%s\n%s\n", $root->getAttribute("name"), $root->getAttribute("version"));
+'
+}
+
+function genRequiresPatchset {
+    local PATCHSET_BASENAME=$1
+    local PATCHSET_LEVEL=$2
+
+    if (( "$PATCHSET_LEVEL" > 1 )); then
+	local PATCHSET_LEVEL=$(($PATCHSET_LEVEL - 1))
+	printf "<module name=\"%s\" />\n" "${PATCHSET_BASENAME}${PATCHSET_LEVEL}"
+    fi
+}
+
+function inner_build_gitref {
+    local REF=$1
+    git checkout "$REF"
+    if [ $? -ne 0 ]; then
+	printerr "Error checking out gitref '%s'.\n" "$REF"
+	return 1
+    fi
+    if [ -f ".gitmodules" ]; then
+	git submodule init && git submodule update
+	if [ $? -ne 0 ]; then
+	    printerr "Error initializing and updating git submodules.\n"
+	    return 1
+	fi
+    fi
+    rm -Rf .git
+    autoconf && ./configure --prefix=/relocate_me_please && make webinst
+    if [ $? -ne 0 ]; then
+	printerr "Error building webinst.\n"
+	return 1
+    fi
+}
+
+function build_gitref {
+    local REF=$1
+    local OUT=$2
+
+    local INTERACTIVE=0
+    if [ -t 1 ]; then
+	INTERACTIVE=1
+    fi
+
+    local WORK_DIR=$(mktemp -t -d "build_gitref.XXXXXX.tmp")
+    if [ $? -ne 0 ]; then
+        printf "Error creating temporary directory.\n"
+        return 1
+    fi
+    local LOG=$(mktemp "${WORK_DIR}/build_gitref.XXXXXX.log")
+    if [ $? -ne 0 ]; then
+	printf "Error creating temporarry log file.\n"
+	rm -Rf -- "$WORK_DIR"
+	return 1
+    fi
+
+    printf "[+] Cloning '%s' into '%s'.\n" "$PWD" "$WORK_DIR/git"
+    git clone -q "$PWD" "$WORK_DIR/git"
+    RET=$?
+    if [ $RET -ne 0 ]; then
+	printerr "Error cloning '%s' into '%s'.\n" "$PWD" "$WORK_DIR/git"
+	rm -Rf -- "$WORK_DIR"
+	return $RET
+    fi
+
+    printf "[+] Building webinst from source '%s'.\n" "$WORK_DIR/git"
+    (
+        (
+            cd "$WORK_DIR/git"
+	    if [ $? -ne 0 ]; then
+		printerr "Error changing directory to '%s'.\n" "$WORK_DIR/git"
+		return 1
+	    fi
+	    inner_build_gitref "$REF"
+        ) 2>&1 | progress "$INTERACTIVE" "Building webinst" > "$LOG"
+	if [ $? -ne 0 ]; then
+	    cat "$LOG"
+	    return 1
+	fi
+        mv -v "$WORK_DIR/git"/*.webinst "$OUT"
+    )
+    if [ $? -ne 0 ]; then
+	printerr "Error building webinst.\n"
+	rm -Rf -- "$WORK_DIR"
+	return 1
+    fi
+
+    rm -Rf -- "$WORK_DIR"
+}
+
+function progress {
+    local INTERACTIVE=$1
+    local PROMPT=$2
+    if [ "$INTERACTIVE" = "1" ]; then
+	type -p pv > /dev/null
+	if [ $? -eq 0 ]; then
+	    exec pv -l -N "$1"
+	fi
+    fi
+    exec cat
+}
+
+main "$@"

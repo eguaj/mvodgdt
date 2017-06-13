@@ -1,0 +1,39 @@
+#!/bin/bash
+
+REF_A=$1
+REF_B=$2
+
+function main {
+    build "$REF_A" "a.webinst"
+    build "$REF_B" "b.webinst"
+}
+
+function build {
+    local REF=$1
+    local OUT=$2
+
+    WORK_DIR=$(mktemp -d "buildref.XXXXXX.tmp")
+    if [ $? -ne 0 ]; then
+	printf "Error creating temporary directory.\n"
+	exit 1
+    fi
+    
+    git clone "$PWD" "$WORK_DIR"
+
+    (
+	(
+	    cd "$WORK_DIR" \
+	    && git checkout "$REF" \
+	    && git submodule init \
+	    && git submodule update \
+	    && autoconf \
+	    && ./configure --prefix=/relocate_me_please \
+	    && make webinst
+	)
+	mv -vi "$WORK_DIR"/*.webinst "$OUT"
+    )
+
+    rm -Rf "$WORK_DIR"
+}
+
+main "$@"
